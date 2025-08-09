@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
+import { DndContext, DragEndEvent, PointerSensor, TouchSensor, KeyboardSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core'
+import { SortableContext, useSortable, arrayMove, rectSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { io, Socket } from 'socket.io-client'
 
 // naive local store just for MVP demo
@@ -82,7 +85,6 @@ export default function App() {
   const [revealIndex, setRevealIndex] = useState<number>(-1)
   const [revealWin, setRevealWin] = useState<boolean | null>(null)
   const [endsAt, setEndsAt] = useState<number | null>(null)
-  const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [timerSec, setTimerSec] = useState<number | ''>('')
   const [profanity, setProfanity] = useState<boolean>(false)
   const [myId, setMyId] = useState<string | null>(null)
@@ -270,22 +272,28 @@ export default function App() {
     progressRef.current.style.width = `${pct}%`
   }, [endsAt, now, state])
 
-  function onDragStart(index: number) { setDragIndex(index) }
-  function onDrop(index: number) {
-    if (dragIndex == null || dragIndex === index) return
+  // Drag-and-drop (mobile-friendly) using dnd-kit
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 120, tolerance: 5 } }),
+    useSensor(KeyboardSensor)
+  )
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
     setOrdering(prev => {
-      const arr = prev.slice()
-      const [moved] = arr.splice(dragIndex, 1)
-      arr.splice(index, 0, moved)
+      const oldIndex = prev.indexOf(String(active.id))
+      const newIndex = prev.indexOf(String(over.id))
+      if (oldIndex === -1 || newIndex === -1) return prev
+      const next = arrayMove(prev, oldIndex, newIndex)
       // broadcast preview if I am the guesser
       if (state?.phase === 'guessing' && state.currentRound && myId && state.currentRound.guesserId === myId) {
-        socket.emit('ordering:preview', { ordering: arr })
+        socket.emit('ordering:preview', { ordering: next })
       }
-      return arr
+      return next
     })
-    setDragIndex(null)
   }
-  function onDragOver(e: React.DragEvent) { e.preventDefault() }
 
   return (
     <div className="container py-6 space-y-6">
@@ -390,35 +398,20 @@ export default function App() {
                       </div>
                     )}
                     <div className="text-xs text-neutral-400">Drag to order players from least → greatest, then submit.</div>
-          <ul className={`grid ${gridColsClass(ordering.length || (state.currentRound?.participants.length ?? 1))} gap-2 w-full`}>
-                      {ordering.map((pid, i) => {
-                        const p = state.players.find(pp => pp.id === pid)
-                        if (!p) return null
-                        const ans = state.currentRound?.answers?.[p.id] ?? ''
-                        return (
-              <li key={pid}
-                className="w-full px-3 py-2 rounded bg-neutral-800 border border-neutral-700 cursor-move select-none"
-                              draggable
-                              onDragStart={() => onDragStart(i)}
-                              onDragOver={onDragOver}
-                              onDrop={() => onDrop(i)}
-                          >
-                                <div className="flex items-start justify-between gap-2">
-                                  <div className="flex flex-col min-w-0">
-                                    <span className="truncate">{p.name}</span>
-                                    <span className="text-[11px] text-neutral-400 max-w-[240px] truncate">{ans}</span>
-                                  </div>
-                                  {supportsTTS && ttsEnabled && ans && (
-                                    <button title="Read answer" className="text-neutral-300 hover:text-white text-sm"
-                                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); speakAnswerLine(p.name, ans) }}>
-                                      🔊
-                                    </button>
-                                  )}
-                                </div>
-                          </li>
-                        )
-                      })}
-                    </ul>
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={ordering} strategy={rectSortingStrategy}>
+              <ul className={`grid ${gridColsClass(ordering.length || (state.currentRound?.participants.length ?? 1))} gap-2 w-full`}>
+                {ordering.map(pid => {
+                  const p = state.players.find(pp => pp.id === pid)
+                  if (!p) return null
+                  const ans = state.currentRound?.answers?.[p.id] ?? ''
+                  return (
+                    <SortableItem key={pid} id={pid} name={p.name} answer={ans} ttsEnabled={supportsTTS && ttsEnabled} onSpeak={() => speakAnswerLine(p.name, ans)} />
+                  )
+                })}
+              </ul>
+            </SortableContext>
+          </DndContext>
                     <div className="flex gap-2 items-center">
                       <button className="button" onClick={submitOrdering} disabled={ordering.length !== state.currentRound.participants.length}>Submit ordering</button>
                       {supportsTTS && ttsEnabled && (
@@ -466,11 +459,12 @@ export default function App() {
                       </div>
                 )
               )}
-              {state.phase === 'reveal' && result && (
+        {state.phase === 'reveal' && result && (
                 <Reveal
                   players={state.players}
                   numbers={result.numbers}
                   submitted={result.submitted ?? []}
+          answers={state.currentRound?.answers ?? {}}
                   onDone={(win) => setRevealWin(win)}
                 />
               )}
@@ -525,16 +519,57 @@ export default function App() {
   )
 }
 
+type SortableItemProps = {
+  id: string
+  name: string
+  answer: string
+  ttsEnabled: boolean
+  onSpeak: () => void
+}
+
+function SortableItem({ id, name, answer, ttsEnabled, onSpeak }: SortableItemProps) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id })
+  const localRef = React.useRef<HTMLLIElement | null>(null)
+  const setRefs = (el: HTMLLIElement | null) => { setNodeRef(el); localRef.current = el }
+  useEffect(() => {
+    const el = localRef.current
+    if (!el) return
+    const t = transform ? CSS.Transform.toString(transform) : undefined
+    el.style.transform = t ?? ''
+    el.style.transition = transition || ''
+  }, [transform, transition])
+  const dragClasses = isDragging ? 'opacity-80 z-50' : ''
+  return (
+    <li ref={setRefs} {...attributes} {...listeners}
+      className={`w-full px-3 py-2 rounded bg-neutral-800 border border-neutral-700 cursor-grab active:cursor-grabbing select-none touch-none ${dragClasses}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-col min-w-0">
+          <span className="truncate">{name}</span>
+          <span className="text-[11px] text-neutral-400 max-w-[240px] truncate">{answer}</span>
+        </div>
+        {ttsEnabled && answer && (
+          <button title="Read answer" className="text-neutral-300 hover:text-white text-sm"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onSpeak() }}>
+            🔊
+          </button>
+        )}
+      </div>
+    </li>
+  )
+}
+
 type RevealProps = {
   players: { id: string; name: string; seat: number; connected: boolean; color: string }[]
   numbers: Record<string, number>
   submitted: string[]
+  answers: Record<string, string>
   onDone?: (win: boolean) => void
 }
 
-function Reveal({ players, numbers, submitted, onDone }: RevealProps) {
+function Reveal({ players, numbers, submitted, answers, onDone }: RevealProps) {
   const [flipped, setFlipped] = useState<number>(-1)
   const [win, setWin] = useState<boolean | null>(null)
+  const [openId, setOpenId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!submitted || submitted.length === 0) return
@@ -582,9 +617,19 @@ function Reveal({ players, numbers, submitted, onDone }: RevealProps) {
                   <span className={`inline-block w-3 h-3 rounded-full ${colorClass(p.color)}`} />
                   <span className="text-xs text-neutral-300">{p.name}</span>
                 </div>
-                <span className={isFlipped ? 'text-3xl sm:text-4xl font-extrabold text-neutral-100 leading-none' : 'text-xs text-neutral-400'}>
+                <button
+                  disabled={!isFlipped}
+                  onClick={() => setOpenId(prev => (prev === pid ? null : pid))}
+                  className={isFlipped ? 'text-3xl sm:text-4xl font-extrabold text-neutral-100 leading-none hover:opacity-90' : 'text-xs text-neutral-400 cursor-default'}
+                  title={isFlipped ? 'Show full answer' : ''}
+                >
                   {isFlipped ? numbers[pid] : '…'}
-                </span>
+                </button>
+                {isFlipped && openId === pid && (
+                  <div className="mt-1 max-w-[260px] text-xs text-neutral-300 break-words">
+                    {answers[pid] || <span className="text-neutral-500">No answer</span>}
+                  </div>
+                )}
               </div>
             </li>
           )
