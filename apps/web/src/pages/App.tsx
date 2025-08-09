@@ -90,6 +90,68 @@ export default function App() {
   const [orderingPreview, setOrderingPreview] = useState<string[]>([])
   const progressRef = React.useRef<HTMLDivElement | null>(null)
   const [copyMsg, setCopyMsg] = useState<string | null>(null)
+  // Text-to-Speech (local, browser-based)
+  const supportsTTS = typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window
+  const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem('seq_tts') === '1' } catch { return false }
+  })
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
+  const [voiceName, setVoiceName] = useState<string | ''>('')
+
+  // Load voices (they can load async in some browsers)
+  useEffect(() => {
+    if (!supportsTTS) return
+    const load = () => setVoices(window.speechSynthesis.getVoices())
+    load()
+    window.speechSynthesis.addEventListener?.('voiceschanged', load)
+    return () => window.speechSynthesis.removeEventListener?.('voiceschanged', load)
+  }, [supportsTTS])
+
+  useEffect(() => {
+    try { localStorage.setItem('seq_tts', ttsEnabled ? '1' : '0') } catch {}
+  }, [ttsEnabled])
+
+  // On initial load, read first URL path segment and use it as the room code
+  useEffect(() => {
+    try {
+      const raw = window.location.pathname || ''
+      const first = decodeURIComponent((raw.startsWith('/') ? raw.slice(1) : raw).split('/')[0] || '')
+      const seg = first.trim()
+      // Ignore default index paths; otherwise set as uppercase
+      if (seg && seg.toLowerCase() !== 'index.html') {
+        setRoomCode(seg.toUpperCase())
+      }
+    } catch {}
+  }, [])
+
+  function speak(text: string, opts?: { rate?: number }) {
+    if (!supportsTTS || !ttsEnabled) return
+    const u = new SpeechSynthesisUtterance(text)
+    u.rate = opts?.rate ?? 1
+    // choose a voice by name if set
+    if (voiceName) {
+      const v = voices.find((v: SpeechSynthesisVoice) => v.name === voiceName)
+      if (v) u.voice = v
+    }
+    window.speechSynthesis.speak(u)
+  }
+  function cancelSpeak() { if (supportsTTS) window.speechSynthesis.cancel() }
+  function speakAnswerLine(name: string, answer?: string) {
+    if (!answer) return
+    speak(`${name} says: ${answer}`)
+  }
+  function speakAllAnswers(orderingIds: string[], players: RoomState['players'], answers?: Record<string, string>) {
+    if (!supportsTTS || !ttsEnabled || !answers) return
+    cancelSpeak()
+    // Queue in current visual order
+    orderingIds.forEach(pid => {
+      const p = players.find(pp => pp.id === pid)
+      if (!p) return
+      const line = answers[pid]
+      if (!line) return
+      speak(`${p.name} says: ${line}`)
+    })
+  }
 
   useEffect(() => {
     const onState = (payload: RoomState) => { setState(payload); setError(null) }
@@ -131,12 +193,14 @@ export default function App() {
     const code = state?.code || roomCode
     if (!code) return
     try {
-      await navigator.clipboard.writeText(code)
+      const url = `${window.location.origin}/${code}`
+      await navigator.clipboard.writeText(url)
       setCopyMsg('Copied!')
     } catch {
       try {
         const ta = document.createElement('textarea')
-        ta.value = code
+        const url = `${window.location.origin}/${code}`
+        ta.value = url
         document.body.appendChild(ta)
         ta.select()
         document.execCommand('copy')
@@ -154,6 +218,8 @@ export default function App() {
     socket.emit('room:kick', { playerId: pid })
   }
   function submitAnswer() {
+    // Guesser does not submit an answer
+    if (state?.phase === 'answering' && state.currentRound && myId === state.currentRound.guesserId) return
     socket.emit('answer:submit', { text: myAnswer })
   }
   function submitOrdering() {
@@ -225,7 +291,31 @@ export default function App() {
     <div className="container py-6 space-y-6">
       <header className="flex items-center justify-between">
   <h1 className="text-2xl font-semibold">Sequencing</h1>
-        <span className={connected ? 'text-green-400' : 'text-red-400'}>{connected ? 'online' : 'offline'}</span>
+        <div className="flex items-center gap-3 ml-2 sm:ml-4 flex-wrap sm:flex-nowrap">
+          {supportsTTS && (
+            <div className="flex items-center gap-2 text-xs text-neutral-400 flex-wrap sm:flex-nowrap">
+              <label className="flex items-center gap-1 whitespace-nowrap">
+                <input type="checkbox" checked={ttsEnabled} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTtsEnabled(e.target.checked)} />
+                Read answers aloud
+              </label>
+              {ttsEnabled && voices.length > 0 && (
+                <select className="input h-9 py-1 text-sm leading-6 w-[320px] max-w-[70vw]" value={voiceName}
+                  aria-label="Voice"
+                  title="Voice"
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setVoiceName(e.target.value)}>
+                  <option value="">Default voice</option>
+                  {voices.map(v => (
+                    <option key={`${v.name}-${v.lang}`} value={v.name}>{v.name} · {v.lang}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+          {!supportsTTS && (
+            <span className="text-xs text-neutral-500">TTS not supported</span>
+          )}
+          <span className={connected ? 'text-green-400' : 'text-red-400'}>{connected ? 'online' : 'offline'}</span>
+        </div>
       </header>
 
       <section className="card space-y-3">
@@ -273,22 +363,38 @@ export default function App() {
                       <div className="text-xs text-neutral-400 mt-1">Your number</div>
                     </div>
                   )}
-                  <textarea className="input h-24" value={myAnswer} maxLength={200} onChange={e => setMyAnswer(e.target.value)} placeholder="Your answer" />
-                  <div className="flex items-center gap-2">
-                    <button className="button" onClick={submitAnswer} disabled={!myAnswer.trim()}>Submit answer</button>
-            <span className="text-xs text-neutral-400">Answered: {answeredIds.length}/{state.currentRound.participants.length}</span>
-            {endsAt && <span className="text-xs text-neutral-400">Time left: {Math.max(0, Math.ceil((endsAt - now)/1000))}s</span>}
-                  </div>
+                  {myId !== state.currentRound.guesserId ? (
+                    <>
+                      <textarea className="input h-24" value={myAnswer} maxLength={200} onChange={e => setMyAnswer(e.target.value)} placeholder="Your answer" />
+                      <div className="flex items-center gap-2">
+                        <button className="button" onClick={submitAnswer} disabled={!myAnswer.trim()}>Submit answer</button>
+                        <span className="text-xs text-neutral-400">Answered: {answeredIds.length}/{Math.max(0, state.currentRound.participants.length - 1)}</span>
+                        {endsAt && <span className="text-xs text-neutral-400">Time left: {Math.max(0, Math.ceil((endsAt - now)/1000))}s</span>}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-neutral-400">Waiting for players… Answered: {answeredIds.length}/{Math.max(0, state.currentRound.participants.length - 1)}</span>
+                      {endsAt && <span className="text-xs text-neutral-400">Time left: {Math.max(0, Math.ceil((endsAt - now)/1000))}s</span>}
+                    </div>
+                  )}
                 </div>
               )}
                   {state.phase === 'guessing' && state.currentRound && (
                 myId && state.currentRound.guesserId === myId ? (
                   <div className="space-y-2">
+                    {myNumber != null && (
+                      <div className="text-center">
+                        <div className="text-4xl font-extrabold text-neutral-100 leading-none">{myNumber}</div>
+                        <div className="text-xs text-neutral-400 mt-1">Your number</div>
+                      </div>
+                    )}
                     <div className="text-xs text-neutral-400">Drag to order players from least → greatest, then submit.</div>
           <ul className={`grid ${gridColsClass(ordering.length || (state.currentRound?.participants.length ?? 1))} gap-2 w-full`}>
                       {ordering.map((pid, i) => {
                         const p = state.players.find(pp => pp.id === pid)
                         if (!p) return null
+                        const ans = state.currentRound?.answers?.[p.id] ?? ''
                         return (
               <li key={pid}
                 className="w-full px-3 py-2 rounded bg-neutral-800 border border-neutral-700 cursor-move select-none"
@@ -297,16 +403,30 @@ export default function App() {
                               onDragOver={onDragOver}
                               onDrop={() => onDrop(i)}
                           >
-                                <div className="flex flex-col">
-                                  <span>{p.name}</span>
-                                  <span className="text-[11px] text-neutral-400 max-w-[240px] truncate">{state.currentRound?.answers?.[p.id] ?? ''}</span>
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex flex-col min-w-0">
+                                    <span className="truncate">{p.name}</span>
+                                    <span className="text-[11px] text-neutral-400 max-w-[240px] truncate">{ans}</span>
+                                  </div>
+                                  {supportsTTS && ttsEnabled && ans && (
+                                    <button title="Read answer" className="text-neutral-300 hover:text-white text-sm"
+                                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); speakAnswerLine(p.name, ans) }}>
+                                      🔊
+                                    </button>
+                                  )}
                                 </div>
                           </li>
                         )
                       })}
                     </ul>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 items-center">
                       <button className="button" onClick={submitOrdering} disabled={ordering.length !== state.currentRound.participants.length}>Submit ordering</button>
+                      {supportsTTS && ttsEnabled && (
+                        <>
+                          <button className="button" onClick={() => speakAllAnswers(ordering, state.players, state.currentRound?.answers)}>Read all</button>
+                          <button className="button" onClick={cancelSpeak}>Stop</button>
+                        </>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -317,16 +437,31 @@ export default function App() {
                             {orderingPreview.map(pid => {
                               const p = state.players.find(pp => pp.id === pid)
                               if (!p) return null
+                              const ans = state.currentRound?.answers?.[p.id] ?? ''
                               return (
             <li key={pid} className="w-full px-3 py-2 rounded bg-neutral-800 border border-neutral-700 select-none">
-                                  <div className="flex flex-col">
-                                    <span>{p.name}</span>
-                                    <span className="text-[11px] text-neutral-400 max-w-[240px] truncate">{state.currentRound?.answers?.[p.id] ?? ''}</span>
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex flex-col min-w-0">
+                                      <span className="truncate">{p.name}</span>
+                                      <span className="text-[11px] text-neutral-400 max-w-[240px] truncate">{ans}</span>
+                                    </div>
+                                    {supportsTTS && ttsEnabled && ans && (
+                                      <button title="Read answer" className="text-neutral-300 hover:text-white text-sm"
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); speakAnswerLine(p.name, ans) }}>
+                                        🔊
+                                      </button>
+                                    )}
                                   </div>
                                 </li>
                               )
                             })}
                           </ul>
+                        )}
+                        {supportsTTS && ttsEnabled && (
+                          <div className="flex gap-2 items-center">
+                            <button className="button" onClick={() => speakAllAnswers(orderingPreview, state.players, state.currentRound?.answers)}>Read all</button>
+                            <button className="button" onClick={cancelSpeak}>Stop</button>
+                          </div>
                         )}
                       </div>
                 )

@@ -331,8 +331,12 @@ async function main() {
         // auto-advance to guessing if still in answering
         const r = rooms.get(room.code)
         if (!r || r.phase !== 'answering' || !r.currentRound) return
-        const answeredIds = Object.entries(r.currentRound.answers).filter(([_, v]) => v && v.length > 0).map(([k]) => k)
-        if (answeredIds.length < r.currentRound.participants.length) {
+        // count only non-guesser answers
+        const answeredIds = Object.entries(r.currentRound.answers)
+          .filter(([pid, v]) => pid !== r.currentRound!.guesserId && v && v.length > 0)
+          .map(([k]) => k)
+        const required = r.currentRound.participants.length - 1
+        if (answeredIds.length < required) {
           r.phase = 'guessing'
           io.to(r.code).emit('guesser:needed', { guesserId: r.currentRound.guesserId })
           // initialize preview ordering by seat
@@ -359,14 +363,19 @@ async function main() {
       if (!room || room.phase !== 'answering' || !room.currentRound) return
       const round = room.currentRound
       if (!round.participants.includes(playerId)) return
+      // Guesser does not submit an answer
+      if (playerId === round.guesserId) return socket.emit('error', { code: 'GUESSER_NO_ANSWER', message: 'Guesser does not submit an answer' })
       let cleaned = String(text ?? '').trim().slice(0, 200)
       if (room.settings.profanityFilterEnabled) cleaned = filterProfanity(cleaned)
       round.answers[playerId] = cleaned
       // broadcast answered ids
-      const answeredIds = Object.entries(round.answers).filter(([_, v]) => v && v.length > 0).map(([k]) => k)
+      const answeredIds = Object.entries(round.answers)
+        .filter(([pid, v]) => pid !== round.guesserId && v && v.length > 0)
+        .map(([k]) => k)
       io.to(room.code).emit('answer:state', { answeredIds })
       // move to guessing when all answered
-      if (answeredIds.length === round.participants.length) {
+      const required = round.participants.length - 1
+      if (answeredIds.length === required) {
         room.phase = 'guessing'
         // stop answering timer
         if (room.timers?.answering) { clearTimeout(room.timers.answering); room.timers.answering = undefined }

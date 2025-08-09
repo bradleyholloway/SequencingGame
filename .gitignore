@@ -44,3 +44,6 @@ yarn.lock
 # editor/IDE
 .vscode/
 .idea/
+
+# secrets
+secrets/
