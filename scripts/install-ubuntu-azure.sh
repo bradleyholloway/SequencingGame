@@ -18,6 +18,7 @@ REALTIME_PORT="8080"
 NON_INTERACTIVE=0
 SKIP_SSL=0
 SKIP_FIREWALL=0
+NO_CLONE=0
 
 log() { echo -e "\033[1;36m[setup]\033[0m $*"; }
 err() { echo -e "\033[1;31m[error]\033[0m $*" >&2; }
@@ -36,6 +37,7 @@ Options:
   --yes                      Non-interactive (assume yes where applicable)
   --skip-ssl                 Do not install/configure TLS even if domain provided
   --skip-firewall            Do not enable/configure UFW
+  --no-clone                 Do not clone/update the repo (use existing contents of --app-dir)
   -h, --help                 Show this help
 EOF
 }
@@ -59,6 +61,7 @@ parse_args() {
       --yes) NON_INTERACTIVE=1; shift;;
       --skip-ssl) SKIP_SSL=1; shift;;
       --skip-firewall) SKIP_FIREWALL=1; shift;;
+  --no-clone) NO_CLONE=1; shift;;
       -h|--help) usage; exit 0;;
       *) err "Unknown option: $1"; usage; exit 2;;
     esac
@@ -111,13 +114,27 @@ create_app_user() {
 }
 
 clone_or_update_repo() {
+  if [[ $NO_CLONE -eq 1 ]]; then
+    log "--no-clone set: skipping git clone/update. Using existing contents in ${APP_DIR}."
+    return
+  fi
+
   log "Fetching repository ${REPO_URL} (${BRANCH}) into ${APP_DIR}..."
+  # If using HTTPS and GITHUB_TOKEN is set, add Authorization header for private repo access.
+  local GIT_AUTH_ARG=()
+  if [[ -n "${GITHUB_TOKEN:-}" && "$REPO_URL" == https://* ]]; then
+    GIT_AUTH_ARG=( -c "http.extraHeader=Authorization: Bearer ${GITHUB_TOKEN}" )
+  fi
+
   if [[ -d "$APP_DIR/.git" ]]; then
-    sudo -u sequencing -H git -C "$APP_DIR" fetch --all --prune
+    sudo -u sequencing -H git "${GIT_AUTH_ARG[@]}" -C "$APP_DIR" fetch --all --prune
     sudo -u sequencing -H git -C "$APP_DIR" checkout "$BRANCH"
-    sudo -u sequencing -H git -C "$APP_DIR" reset --hard "origin/${BRANCH}"
+    sudo -u sequencing -H git "${GIT_AUTH_ARG[@]}" -C "$APP_DIR" reset --hard "origin/${BRANCH}"
   else
-    sudo -u sequencing -H git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"
+    # Ensure directory exists and owned by sequencing
+    mkdir -p "$APP_DIR"
+    chown -R sequencing:sequencing "$APP_DIR"
+    sudo -u sequencing -H git "${GIT_AUTH_ARG[@]}" clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$APP_DIR"
   fi
 }
 
@@ -180,22 +197,22 @@ server {
   location /socket.io {
     proxy_pass http://127.0.0.1:${REALTIME_PORT};
     proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
+    proxy_set_header Host \$host;
     proxy_read_timeout 600s;
     proxy_send_timeout 600s;
   }
 
     # Static assets: cache aggressively
-    location ~* \.(?:js|css|woff2?|ttf|eot|otf|svg)$ {
-        try_files $uri =404;
+  location ~* \.(?:js|css|woff2?|ttf|eot|otf|svg)$ {
+    try_files \$uri =404;
         add_header Cache-Control "public, max-age=31536000, immutable";
     }
 
     # SPA fallback
-    location / {
-        try_files $uri /index.html;
+  location / {
+    try_files \$uri /index.html;
         add_header Cache-Control "no-store";
     }
 }
