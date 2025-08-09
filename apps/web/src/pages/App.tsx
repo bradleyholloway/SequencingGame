@@ -520,7 +520,7 @@ export default function App() {
         </section>
       )}
 
-  <footer className="text-xs text-neutral-500">Sequencing · MVP · self-hosted ARM + Apache</footer>
+  <footer className="text-xs text-neutral-500">Sequencing Game Online</footer>
     </div>
   )
 }
@@ -577,12 +577,14 @@ function Reveal({ players, numbers, submitted, onDone }: RevealProps) {
           }
           return (
             <li key={pid} className={`w-full px-3 py-2 rounded bg-neutral-800 border ${border} select-none transition-transform duration-300`}>
-              <div className="flex items-center gap-2">
-                <span className={`inline-block w-3 h-3 rounded-full ${colorClass(p.color)}`} />
-                <div className="flex flex-col">
-                  <span>{p.name}</span>
-                  <span className="text-[11px] text-neutral-400">{isFlipped ? numbers[pid] : '…'}</span>
+              <div className="flex flex-col items-center justify-center gap-1 text-center">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block w-3 h-3 rounded-full ${colorClass(p.color)}`} />
+                  <span className="text-xs text-neutral-300">{p.name}</span>
                 </div>
+                <span className={isFlipped ? 'text-3xl sm:text-4xl font-extrabold text-neutral-100 leading-none' : 'text-xs text-neutral-400'}>
+                  {isFlipped ? numbers[pid] : '…'}
+                </span>
               </div>
             </li>
           )
